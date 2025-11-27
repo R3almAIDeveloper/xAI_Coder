@@ -1,25 +1,78 @@
+// src/lib/supabase.ts
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim();
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim();
 
-// Create client only if environment variables are available
-export const supabase = supabaseUrl && supabaseAnonKey 
-  ? createClient(supabaseUrl, supabaseAnonKey)
-  : null;
+// === Validation ===
+if (!supUrl || !supabaseAnonKey) {
+  console.error('Missing Supabase environment variables!');
+  console.error('Please create .env file with:');
+  console.error('VITE_SUPABASE_URL=your-url');
+  console.error('VITE_SUPABASE_ANON_KEY=your-key');
+  throw new Error('Supabase configuration is missing');
+}
 
-export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
+// === Client ===
+export const supabase = createClient(supUrl, supabaseAnonKey);
 
-export function getUserId(): string {
-  let userId = localStorage.getItem('grok-user-id');
+// === Get Current User ID — throws if not authenticated ===
+export const getUserId = async (): Promise<string> => {
+  const { data, error } = await supabase.auth.getUser();
 
-  if (!userId) {
-    userId = crypto.randomUUID();
-    localStorage.setItem('grok-user-id', userId);
-    console.log('Generated new user ID:', userId);
-  } else {
-    console.log('Using existing user ID:', userId);
+  if (error || !data?.user?.id) {
+    console.warn('No authenticated user found:', error:', error);
+    throw new Error('User not authenticated. Please sign in.');
   }
 
-  return userId;
+  return data.user.id;
+};
+
+// === Optional: Get user safely (returns null if not logged in) ===
+export const getUserSafe = async () => {
+  const { data } = await supabase.auth.getUser();
+  return data.user ?? null;
+};
+
+// === File Upload Utility ===
+export const uploadFile = async (file: File) => {
+  const userId = await getUserId(); // will throw if not logged in
+  const fileExt = file.name.split('.').pop()?.toLowerCase() || 'bin';
+  const fileName = `${crypto.randomUUID()}.${fileExt}`;
+  const filePath = `${userId}/${fileName}`;
+
+  const { data, error } = await supabase.storage
+    .from('chat-attachments')
+    .upload(filePath, file, {
+      cacheControl: '3600',
+      upsert: false,
+    });
+
+  if (error) {
+    console.error('Upload failed:', error);
+    return { data: null, error };
+  }
+
+  const { data: urlData } = supabase.storage
+    .from('chat-attachments')
+    .getPublicUrl(filePath);
+
+  return {
+    data: {
+      path: filePath,
+      publicUrl: urlData.publicUrl,
+      name: file.name,
+      size: file.size,
+      type: file.type || 'application/octet-stream',
+    },
+    error: null,
+  };
+};
+
+// === Default Export (for backward compatibility with App.tsx) ===
+export default supabase;
+
+// === Debug (dev only) ===
+if (import.meta.env.DEV) {
+  console.log('Supabase client initialized:', supUrl);
 }

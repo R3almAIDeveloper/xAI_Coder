@@ -1,4 +1,5 @@
-import { Bot, User, Paperclip, Download } from 'lucide-react';
+import { useState } from 'react';
+import { Bot, User, Paperclip, Download, FileText, AlertCircle } from 'lucide-react';
 import { Message, FileAttachment } from '../types';
 
 interface ChatMessageProps {
@@ -6,6 +7,9 @@ interface ChatMessageProps {
 }
 
 function AttachmentPreview({ attachment }: { attachment: FileAttachment }) {
+  const [previewText, setPreviewText] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState(false);
+
   const formatFileSize = (bytes: number): string => {
     if (bytes === 0) return '0 Bytes';
     const k = 1024;
@@ -15,26 +19,61 @@ function AttachmentPreview({ attachment }: { attachment: FileAttachment }) {
   };
 
   const downloadFile = () => {
-    try {
-      const byteCharacters = atob(attachment.content);
-      const byteNumbers = new Array(byteCharacters.length);
-      for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i);
-      }
-      const byteArray = new Uint8Array(byteNumbers);
-      const blob = new Blob([byteArray], { type: attachment.type });
-      
-      const url = URL.createObjectURL(blob);
+    if (attachment.url) {
+      // Download from URL
       const a = document.createElement('a');
-      a.href = url;
+      a.href = attachment.url;
       a.download = attachment.name;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (error) {
-      console.error('Error downloading file:', error);
-      alert('Failed to download file');
+    } else if (attachment.content) {
+      // Legacy base64 download
+      try {
+        const byteCharacters = atob(attachment.content);
+        const byteNumbers = new Array(byteCharacters.length);
+        for (let i = 0; i < byteCharacters.length; i++) {
+          byteNumbers[i] = byteCharacters.charCodeAt(i);
+        }
+        const byteArray = new Uint8Array(byteNumbers);
+        const blob = new Blob([byteArray], { type: attachment.type });
+        
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = attachment.name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        console.error('Error downloading file:', error);
+        alert('Failed to download file');
+      }
+    } else {
+      alert('No file data available for download.');
+    }
+  };
+
+  const loadPreviewText = async () => {
+    if (previewText !== null) return; // Already loaded
+
+    try {
+      let textContent = '';
+      if (attachment.url) {
+        const response = await fetch(attachment.url);
+        if (!response.ok) throw new Error('Failed to fetch file');
+        textContent = await response.text();
+      } else if (attachment.content) {
+        textContent = atob(attachment.content);
+      } else {
+        return;
+      }
+
+      setPreviewText(textContent.substring(0, 500) + (textContent.length > 500 ? '...' : ''));
+    } catch (err) {
+      console.error('Error loading preview:', err);
+      setPreviewError(true);
     }
   };
 
@@ -63,18 +102,32 @@ function AttachmentPreview({ attachment }: { attachment: FileAttachment }) {
       
       {isImage && (
         <img
-          src={`data:${attachment.type};base64,${attachment.content}`}
+          src={attachment.url || `data:${attachment.type};base64,${attachment.content}`}
           alt={attachment.name}
           className="max-w-full max-h-48 rounded border border-white/20"
+          onError={(e) => {
+            (e.target as HTMLImageElement).style.display = 'none';
+          }}
         />
       )}
       
-      {isText && attachment.size < 1024 * 10 && ( // Show preview for small text files
+      {isText && (
         <div className="mt-2 p-2 bg-black/20 rounded text-xs font-mono overflow-auto max-h-32">
-          <pre className="whitespace-pre-wrap">
-            {atob(attachment.content).substring(0, 500)}
-            {atob(attachment.content).length > 500 && '...'}
-          </pre>
+          {previewText === null ? (
+            <div className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer" onClick={loadPreviewText}>
+              <span>Click to preview content</span>
+              <FileText size={12} />
+            </div>
+          ) : previewError ? (
+            <div className="text-xs text-red-400 flex items-center gap-1">
+              <AlertCircle size={12} />
+              Failed to load preview
+            </div>
+          ) : (
+            <pre className="whitespace-pre-wrap">
+              {previewText}
+            </pre>
+          )}
         </div>
       )}
     </div>

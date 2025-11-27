@@ -1,258 +1,371 @@
-import { useRef, useEffect } from 'react';
-import { Settings as SettingsIcon, Loader2, AlertCircle } from 'lucide-react';
-import { Message, FileAttachment } from './types';
+// src/App.tsx
+import React, { useState, useEffect } from 'react';
+import {
+  Loader2,
+  AlertCircle,
+  FolderOpen,
+  Folder as FolderClosed,
+  FileText,
+  FileCode,
+  FileJson,
+  Package,
+  ChevronRight,
+  ChevronDown,
+  FilePlus,
+  FolderPlus,
+  Save,
+  Check,
+  MessageSquare,
+  Settings,
+  Plus,
+  LogOut,
+} from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { supabase, getUserId } from './lib/supabase';
+import { NavigationMenu } from './components/NavigationMenu';
+import { SettingsPage } from './components/SettingsPage';
+import { HierarchicalSidebar } from './components/HierarchicalSidebar';
 import { useSettings } from './hooks/useSettings';
-import { useMessages } from './hooks/useMessages';
-import { SettingsModal } from './components/SettingsModal';
-import { ModelSelectorModal } from './components/ModelSelectorModal';
-import { ChatMessage } from './components/ChatMessage';
-import { ChatInput } from './components/ChatInput';
+import { Project, Conversation } from './types';
 
-function App() {
-  const [isLoading, setIsLoading] = useState(false);
+interface FileNode {
+  id: string;
+  name: string;
+  type: 'file' | 'folder';
+  path: string;
+  children?: FileNode[];
+}
+
+export function App() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { settings, isLoading: settingsLoading } = useSettings();
+
+  // Global State
+  const [userName] = useState('Developer'); // Replace with real auth later
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+  const [currentProjectName, setCurrentProjectName] = useState('Untitled Project');
+  const [currentConvId, setCurrentConvId] = useState<string | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [files, setFiles] = useState<FileNode[]>([]);
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [selectedFile, setSelectedFile] = useState<FileNode | null>(null);
+  const [fileContent, setFileContent] = useState<string>('');
+  const [isSaving, setIsSaving] = useState(false);
+  const [lastSaved, setLastSaved] = useState<Date | null>(null);
+  const [creatingFileIn, setCreatingFileIn] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isModelSelectorOpen, setIsModelSelectorOpen] = useState(false);
-  const { settings, setSettings, isLoading: isLoadingSettings } = useSettings();
-  const { messages, addMessage, isLoading: isLoadingMessages } = useMessages();
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [globalLoading, setGlobalLoading] = useState(true);
+  const [showSettings, setShowSettings] = useState(false);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
-
+  // Load projects and conversations
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    const loadData = async () => {
+      try {
+        const userId = await getUserId();
+        if (!userId) throw new Error('Not authenticated');
 
-  const sendMessage = async (content: string, attachments?: FileAttachment[]) => {
-    if (!settings.apiKey) {
-      setError('Please configure your API key in settings');
-      setIsSettingsOpen(true);
+        // Load projects
+        const { data: projectData } = await supabase
+          .from('projects')
+          .select('*')
+          .order('updated_at', { ascending: false });
+
+        // Load conversations
+        const { data: convData } = await supabase
+          .from('conversations')
+          .select('*')
+          .order('updated_at', { ascending: false });
+
+        setProjects(projectData || []);
+        setConversations(convData || []);
+
+        // Auto-select first project if none selected
+        if (!currentProjectId && projectData && projectData.length > 0) {
+          handleSelectProject(projectData[0].id);
+        }
+      } catch (err) {
+        setError('Failed to load workspace');
+      } finally {
+        setGlobalLoading(false);
+      }
+    };
+
+    loadData();
+  }, []);
+
+  // Load files when project changes
+  const loadFiles = async () => {
+    if (!currentProjectId) {
+      setFiles([]);
       return;
     }
 
-    const userMessage: Message = {
-      role: 'user',
-      content,
-      timestamp: Date.now(),
-      attachments,
-    };
-
-    await addMessage(userMessage);
-    setIsLoading(true);
-    setError(null);
-
     try {
-      const apiUrl = `${settings.baseUrl}/v1/chat/completions`;
+      const { data, error } = await supabase.storage
+        .from('project-files')
+        .list(`${currentProjectId}/`, { limit: 1000, sortBy: { column: 'name', order: 'asc' } });
 
-      // Auto-select best model if "auto" is chosen
-      const modelToUse = settings.model === 'auto' ? 'grok-2-latest' : settings.model;
+      if (error) throw error;
 
-      // Prepare messages for API
-      const apiMessages = [
-        ...messages.map((msg) => ({
-          role: msg.role,
-          content: msg.content,
-        })),
-      ];
+      // Build tree structure from flat list
+      const tree: FileNode[] = [];
+      const map = new Map<string, FileNode>();
 
-      // Add current message with attachments if any
-      let currentMessageContent = content;
-      if (attachments && attachments.length > 0) {
-        currentMessageContent += `\n\nAttached files (${attachments.length}):\n`;
-        attachments.forEach((attachment) => {
-          currentMessageContent += `- ${attachment.name} (${attachment.type}, ${attachment.size} bytes)\n`;
-          
-          // For text files, include content
-          if (attachment.type.startsWith('text/') || 
-              attachment.type === 'application/json' ||
-              attachment.name.endsWith('.md') ||
-              attachment.name.endsWith('.txt') ||
-              attachment.name.endsWith('.js') ||
-              attachment.name.endsWith('.ts') ||
-              attachment.name.endsWith('.jsx') ||
-              attachment.name.endsWith('.tsx') ||
-              attachment.name.endsWith('.css') ||
-              attachment.name.endsWith('.html') ||
-              attachment.name.endsWith('.xml') ||
-              attachment.name.endsWith('.yaml') ||
-              attachment.name.endsWith('.yml')) {
-            try {
-              const textContent = atob(attachment.content);
-              currentMessageContent += `\nContent of ${attachment.name}:\n\`\`\`\n${textContent}\n\`\`\`\n`;
-            } catch (error) {
-              console.error('Error decoding text file:', error);
-            }
+      data.forEach(item => {
+        const path = item.name;
+        const parts = path.split('/');
+        let current = tree;
+
+        parts.forEach((part, i) => {
+          const fullPath = parts.slice(0, i + 1).join('/');
+          let node = map.get(fullPath);
+
+          if (!node) {
+            node = {
+              id: fullPath,
+              name: part || 'root',
+              type: i === parts.length - 1 && !item.metadata?.mimetype?.includes('directory') ? 'file' : 'folder',
+              path: fullPath,
+              children: [],
+            };
+            map.set(fullPath, node);
+            current.push(node);
+          }
+
+          if (node.type === 'folder' && i < parts.length - 1) {
+            current = node.children!;
           }
         });
-      }
-
-      const payload = {
-        model: modelToUse,
-        messages: [...apiMessages, { role: 'user', content: currentMessageContent }],
-      };
-
-      console.log('API Request:', { url: apiUrl, model: modelToUse });
-
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${settings.apiKey}`,
-        },
-        body: JSON.stringify(payload),
       });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        console.error('API Error:', response.status, errorData);
-        const errorMsg = errorData.error?.message || errorData.message || response.statusText;
-        throw new Error(
-          `${response.status} Error: ${errorMsg}`
-        );
-      }
-
-      const data = await response.json();
-      console.log('API Response:', data);
-
-      const assistantMessage: Message = {
-        role: 'assistant',
-        content: data.choices?.[0]?.message?.content || 'No response from AI',
-        timestamp: Date.now(),
-      };
-
-      await addMessage(assistantMessage);
+      setFiles(tree);
     } catch (err) {
-      console.error('Request failed:', err);
-      const errorMessage = err instanceof Error ? err.message : 'Failed to send message';
-      setError(errorMessage);
-    } finally {
-      setIsLoading(false);
+      setError('Failed to load files');
     }
   };
 
-  const hasApiKey = Boolean(settings.apiKey);
+  useEffect(() => {
+    loadFiles();
+  }, [currentProjectId]);
 
-  if (isLoadingSettings || isLoadingMessages) {
+  // Handlers
+  const handleSelectProject = (projectId: string) => {
+    const project = projects.find(p => p.id === projectId);
+    if (project) {
+      setCurrentProjectId(projectId);
+      setCurrentProjectName(project.title);
+      setCurrentConvId(null);
+    }
+  };
+
+  const handleSelectConversation = (convId: string) => {
+    setCurrentConvId(convId);
+    navigate(`/chat/${convId}`);
+  };
+
+  const handleCreateProject = async () => {
+    const title = prompt('Project name:') || 'New Project';
+    const { data, error } = await supabase
+      .from('projects')
+      .insert({ title })
+      .select()
+      .single();
+
+    if (data) {
+      setProjects(prev => [data, ...prev]);
+      handleSelectProject(data.id);
+    }
+  };
+
+  const handleCreateConversation = async () => {
+    if (!currentProjectId) return;
+
+    const { data, error } = await supabase
+      .from('conversations')
+      .insert({
+        title: 'New Chat',
+        project_id: currentProjectId,
+      })
+      .select()
+      .single();
+
+    if (data) {
+      setConversations(prev => [data, ...prev]);
+      handleSelectConversation(data.id);
+    }
+  };
+
+  const handleSaveFile = async () => {
+    if (!selectedFile || !currentProjectId) return;
+
+    setIsSaving(true);
+    try {
+      const { error } = await supabase.storage
+        .from('project-files')
+        .upload(`${currentProjectId}/${selectedFile.path}`, fileContent, {
+          upsert: true,
+          contentType: 'text/plain',
+        });
+
+      if (error) throw error;
+      setLastSaved(new Date());
+    } catch (err) {
+      setError('Failed to save file');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleLogout = () => {
+    supabase.auth.signOut();
+    navigate('/login');
+  };
+
+  if (globalLoading || settingsLoading) {
     return (
-      <div className="h-screen flex items-center justify-center bg-gradient-to-br from-gray-50 to-gray-100">
-        <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+      <div className="fixed inset-0 bg-gradient-to-br from-indigo-50 to-purple-50 flex items-center justify-center">
+        <div className="text-center">
+          <Loader2 className="w-16 h-16 animate-spin text-indigo-600 mx-auto mb-6" />
+          <p className="text-xl font-medium text-gray-700">Loading xAI Coder...</p>
+        </div>
       </div>
     );
   }
 
+  if (showSettings) {
+    return <SettingsPage />;
+  }
+
   return (
-    <div className="h-screen flex flex-col bg-gradient-to-br from-gray-50 to-gray-100">
-      <header className="bg-white border-b shadow-sm">
-        <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-600 to-cyan-500 flex items-center justify-center">
-              <span className="text-white font-bold text-xl">G</span>
-            </div>
-            <div>
-              <h1 className="text-xl font-bold text-gray-900">Grok Chat</h1>
-              <p className="text-sm text-gray-500">Powered by xAI</p>
-            </div>
-          </div>
+    <div className="min-h-screen bg-gray-50">
+      {/* Professional Navigation */}
+      <NavigationMenu
+        projects={projects}
+        conversations={conversations}
+        currentProjectId={currentProjectId}
+        currentConvId={currentConvId}
+        currentProjectName={currentProjectName}
+        onSelectProject={handleSelectProject}
+        onSelectConversation={handleSelectConversation}
+        onCreateProject={handleCreateProject}
+        onCreateConversation={handleCreateConversation}
+        onOpenSettings={() => setShowSettings(true)}
+        userName={userName}
+        onLogout={handleLogout}
+      />
 
-          <button
-            onClick={() => setIsSettingsOpen(true)}
-            className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-            aria-label="Open settings"
-          >
-            <SettingsIcon size={24} className="text-gray-600" />
-          </button>
-        </div>
-      </header>
+      {/* Main Layout */}
+      <div className="pt-16 flex h-screen">
+        {/* Hierarchical Sidebar */}
+        <aside className="w-80 bg-white border-r border-gray-200 flex flex-col">
+          <HierarchicalSidebar
+            currentProjectId={currentProjectId}
+            currentConvId={currentConvId}
+            projects={projects}
+            conversations={conversations}
+            onSelectProject={handleSelectProject}
+            onSelectConv={handleSelectConversation}
+            onCreateNewProject={handleCreateProject}
+            onCreateNewConv={handleCreateConversation}
+            onDeleteConv={async (id) => {
+              await supabase.from('conversations').delete().eq('id', id);
+              setConversations(prev => prev.filter(c => c.id !== id));
+            }}
+            onUpdateTitle={async (id, title, isProject) => {
+              const table = isProject ? 'projects' : 'conversations';
+              await supabase.from(table).update({ title }).eq('id', id);
+              if (isProject) {
+                setProjects(prev => prev.map(p => p.id === id ? { ...p, title } : p));
+                if (currentProjectId === id) setCurrentProjectName(title);
+              } else {
+                setConversations(prev => prev.map(c => c.id === id ? { ...c, title } : c));
+              }
+            }}
+          />
+        </aside>
 
-      {!hasApiKey && (
-        <div className="bg-yellow-50 border-b border-yellow-200 px-4 py-3">
-          <div className="max-w-4xl mx-auto flex items-center gap-3 text-yellow-800">
-            <AlertCircle size={20} />
-            <p className="text-sm">
-              Please configure your API key in settings to start chatting.
-            </p>
-          </div>
-        </div>
-      )}
-
-      {error && (
-        <div className="bg-red-50 border-b border-red-200 px-4 py-3">
-          <div className="max-w-4xl mx-auto flex items-center gap-3 text-red-800">
-            <AlertCircle size={20} />
-            <p className="text-sm">{error}</p>
-            <button
-              onClick={() => setError(null)}
-              className="ml-auto text-red-600 hover:text-red-700 font-medium text-sm"
-            >
-              Dismiss
-            </button>
-          </div>
-        </div>
-      )}
-
-      <div className="flex-1 overflow-y-auto">
-        <div className="max-w-4xl mx-auto px-4 py-6">
-          {messages.length === 0 ? (
-            <div className="h-full flex items-center justify-center">
-              <div className="text-center space-y-4">
-                <div className="w-16 h-16 mx-auto rounded-full bg-gradient-to-br from-blue-600 to-cyan-500 flex items-center justify-center">
-                  <span className="text-white font-bold text-3xl">G</span>
+        {/* Main Content Area */}
+        <main className="flex-1 flex flex-col">
+          {location.pathname.startsWith('/chat/') ? (
+            <div className="flex-1 bg-white">
+              {/* Chat Interface will go here */}
+              <div className="h-full flex items-center justify-center text-gray-400">
+                <div className="text-center">
+                  <MessageSquare className="w-24 h-24 mx-auto mb-6 opacity-50" />
+                  <p className="text-2xl font-medium">Chat coming soon</p>
                 </div>
-                <h2 className="text-2xl font-bold text-gray-900">Start a conversation</h2>
-                <p className="text-gray-600 max-w-md">
-                  Ask me anything! I'm Grok, powered by xAI's advanced language model.
-                </p>
               </div>
             </div>
           ) : (
-            <div className="space-y-6">
-              {messages.map((message, index) => (
-                <ChatMessage key={index} message={message} />
-              ))}
-              {isLoading && (
-                <div className="flex gap-3 justify-start">
-                  <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-cyan-500 flex items-center justify-center">
-                    <Loader2 size={18} className="text-white animate-spin" />
-                  </div>
-                  <div className="bg-gray-100 rounded-2xl rounded-bl-sm px-4 py-3">
-                    <div className="flex gap-1">
-                      <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                      <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                      <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+            <div className="flex-1 flex">
+              {/* File Tree */}
+              <div className="w-80 bg-gray-50 border-r border-gray-200 p-4 overflow-y-auto">
+                {/* File explorer tree */}
+                <div className="space-y-1">
+                  {files.map(node => (
+                    <div key={node.id}>
+                      <button className="flex items-center gap-2 w-full px-3 py-2 hover:bg-white rounded-lg text-left">
+                        {node.type === 'folder' ? <FolderOpen className="w-5 h-5 text-indigo-600" /> : <FileText className="w-5 h-5 text-gray-600" />}
+                        <span className="text-sm">{node.name}</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Editor */}
+              <div className="flex-1 bg-white flex flex-col">
+                {selectedFile ? (
+                  <>
+                    <div className="border-b border-gray-200 px-6 py-4 flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <FileCode className="w-5 h-5 text-gray-600" />
+                        <span className="font-medium text-gray-800">{selectedFile.name}</span>
+                        {isSaving && <Loader2 className="w-4 h-4 animate-spin" />}
+                        {lastSaved && !isSaving && <Check className="w-4 h-4 text-green-600" />}
+                      </div>
+                      <button
+                        onClick={handleSaveFile}
+                        disabled={isSaving}
+                        className="px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition flex items-center gap-2 text-sm font-medium"
+                      >
+                        <Save className="w-4 h-4" />
+                        {isSaving ? 'Saving...' : 'Save'}
+                      </button>
+                    </div>
+                    <textarea
+                      className="flex-1 p-8 font-mono text-sm bg-gray-50 resize-none focus:outline-none leading-relaxed"
+                      value={fileContent}
+                      onChange={e => setFileContent(e.target.value)}
+                      spellCheck={false}
+                      placeholder="// Start coding..."
+                    />
+                  </>
+                ) : (
+                  <div className="flex-1 flex items-center justify-center text-gray-400">
+                    <div className="text-center">
+                      <FileText className="w-20 h-20 mx-auto mb-6 opacity-50" />
+                      <p className="text-xl font-medium">Select a file to edit</p>
+                      <p className="text-sm mt-3">or create something new</p>
                     </div>
                   </div>
-                </div>
-              )}
-              <div ref={messagesEndRef} />
+                )}
+              </div>
             </div>
           )}
-        </div>
+        </main>
       </div>
 
-      <ChatInput
-        onSend={sendMessage}
-        disabled={isLoading || !hasApiKey}
-        currentModel={settings.model}
-        onOpenModelSelector={() => setIsModelSelectorOpen(true)}
-      />
-
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        settings={settings}
-        onSave={setSettings}
-      />
-
-      <ModelSelectorModal
-        isOpen={isModelSelectorOpen}
-        onClose={() => setIsModelSelectorOpen(false)}
-        currentModel={settings.model}
-        onSelectModel={(model) => {
-          setSettings({ ...settings, model });
-        }}
-      />
+      {/* Error Toast */}
+      {error && (
+        <div className="fixed bottom-8 left-1/2 -translate-x-1/2 bg-red-600 text-white px-8 py-4 rounded-2xl shadow-2xl flex items-center gap-3 z-50">
+          <AlertCircle className="w-6 h-6" />
+          <span>{error}</span>
+          <button onClick={() => setError(null)} className="ml-6 text-2xl">×</button>
+        </div>
+      )}
     </div>
   );
 }
